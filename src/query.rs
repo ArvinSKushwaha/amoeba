@@ -4,7 +4,7 @@ use reqwest::Url;
 
 use std::ops::Deref;
 
-pub struct Query(String);
+pub struct Query(pub String);
 
 impl Query {
     pub fn new(query: impl Into<String>) -> Self {

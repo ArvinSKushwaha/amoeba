@@ -1,7 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use eyre::Result;
-use reqwest::Url;
+use reqwest::{get, Url};
 use serde::{Deserialize, Serialize};
 use urlencoding::encode;
 
@@ -89,8 +89,9 @@ impl<E: Error> Error for WikipediaSearchError<E> {
     }
 }
 
+#[async_trait::async_trait]
 impl Search for WikipediaSearch {
-    fn query(&self, query: Query) -> Result<Vec<SearchResult>> {
+    async fn query(&self, query: Query) -> Result<Vec<SearchResult>> {
         let encoded_query = encode(&query);
         let mut url = WIKIPEDIA_URL.clone();
         url.set_path("/w/rest.php/v1/search/page");
@@ -103,7 +104,7 @@ impl Search for WikipediaSearch {
         let mut response = None;
 
         for _ in 0..CONNECT_ATTEMPTS_MAX {
-            match reqwest::blocking::get(url.clone()) {
+            match get(url.clone()).await {
                 Ok(resp) => {
                     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                         std::thread::sleep(Duration::from_secs(1));
@@ -135,7 +136,7 @@ impl Search for WikipediaSearch {
         }
 
         let response = response.unwrap();
-        let json = response.json::<Pages>();
+        let json = response.json::<Pages>().await;
 
         if let Err(e) = json {
             return Err(WikipediaSearchError {
@@ -171,16 +172,5 @@ impl Search for WikipediaSearch {
                 }
             })
             .collect())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    pub fn test_wikipedia() {
-        use super::*;
-
-        let search = WikipediaSearch.query(Query::new("test"));
-        println!("{:#?}", search);
     }
 }

@@ -1,9 +1,11 @@
-use std::{error::Error, time::Duration};
-
-use eyre::Result;
-use reqwest::{get, Url};
+use http::{StatusCode, Uri};
+use hyper_tls::HttpsConnector;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use urlencoding::encode;
+
+use hyper::{Body, Client, Request};
 
 use crate::{
     query::{Query, SearchResult},
@@ -14,7 +16,7 @@ use super::Search;
 
 lazy_static::lazy_static! {
     static ref USER_AGENT: String = format!("{}/{} ({})", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_AUTHORS"));
-    static ref WIKIPEDIA_URL: Url = "https://en.wikipedia.org".parse().expect("Invalid Wikipedia URL");
+    static ref WIKIPEDIA_URL: String = "https://en.wikipedia.org".to_string();
 }
 
 const WIKIPEDIA_SEARCH_RESULTS: &str = "5";
@@ -47,68 +49,49 @@ struct Thumbnail {
     url: String,
 }
 
-struct WikipediaSearchError<E> {
-    message: String,
-    context: Option<E>,
-}
-
-impl<E> std::fmt::Display for WikipediaSearchError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl<E: std::fmt::Debug> std::fmt::Debug for WikipediaSearchError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)?;
-        if let Some(context) = &self.context {
-            write!(f, ": {:?}", context)?;
-        }
-        Ok(())
-    }
-}
-
-struct NonError;
-impl std::fmt::Display for NonError {
-    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for NonError {
-    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ok(())
-    }
-}
-
-impl std::error::Error for NonError {}
-
-impl<E: Error> Error for WikipediaSearchError<E> {
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        self.context.as_ref().map(|e| e as _)
-    }
-}
-
 #[async_trait::async_trait]
 impl Search for WikipediaSearch {
-    async fn query(&self, query: Query) -> Result<Vec<SearchResult>> {
+    async fn query(&self, query: Query, sender: Sender<SearchResult>) {
+        let client = Client::builder().build::<_, Body>(HttpsConnector::new());
         let encoded_query = encode(&query);
-        let mut url = WIKIPEDIA_URL.clone();
-        url.set_path("/w/rest.php/v1/search/page");
-        url.query_pairs_mut()
-            .append_pair("q", &encoded_query)
-            .append_pair("limit", WIKIPEDIA_SEARCH_RESULTS);
+        let request = match Request::builder()
+            .method("GET")
+            .header("User-Agent", USER_AGENT.as_str())
+            .uri(format!(
+                "{}/w/rest.php/v1/search/page?limit={}&q={}",
+                WIKIPEDIA_URL.as_str(),
+                WIKIPEDIA_SEARCH_RESULTS,
+                encoded_query
+            ))
+            .body(Body::empty())
+        {
+            Ok(request) => request,
+            Err(err) => {
+                log::error!("Could not create request: {}", err);
+                return;
+            }
+        };
 
-        log::info!("Querying @ Wikipedia URL: {}", url);
+        let craft_request = || {
+            let mut req = Request::builder().method(request.method());
+
+            for (key, value) in request.headers() {
+                req = req.header(key, value);
+            }
+
+            req.uri(request.uri()).body(Body::empty()).unwrap()
+        };
+
+        log::info!("Querying @ Wikipedia URL: {}", craft_request().uri());
 
         let mut response = None;
 
         for _ in 0..CONNECT_ATTEMPTS_MAX {
-            match get(url.clone()).await {
+            match client.request(craft_request()).await {
                 Ok(resp) => {
-                    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    if resp.status() == StatusCode::TOO_MANY_REQUESTS {
                         std::thread::sleep(Duration::from_secs(1));
-                    } else if resp.status() == reqwest::StatusCode::OK {
+                    } else if resp.status() == StatusCode::OK {
                         std::thread::sleep(Duration::from_millis(500));
                         response.replace(resp);
                         break;
@@ -129,29 +112,34 @@ impl Search for WikipediaSearch {
         }
 
         if response.is_none() {
-            return Err(WikipediaSearchError::<NonError> {
-                message: "Failed to fetch Wikipedia search results, aborting search.".to_string(),
-                context: None,
-            })?;
+            log::info!("Failed to fetch Wikipedia search results, aborting search.");
         }
 
         let response = response.unwrap();
-        let json = response.json::<Pages>().await;
-
-        if let Err(e) = json {
-            return Err(WikipediaSearchError {
-                message: "Failed to parse Wikipedia search results, aborting search".to_string(),
-                context: Some(e),
-            })?;
+        let json = match hyper::body::to_bytes(response.into_body()).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                log::error!("Could not read Wikipedia response: {}", err);
+                return;
+            }
         }
+        .to_vec();
+        let json = String::from_utf8_lossy(&json);
 
-        let json = json.unwrap().pages;
+        let pages = match serde_json::from_str::<Pages>(&json) {
+            Ok(pages) => pages,
+            Err(err) => {
+                log::error!("Could not parse Wikipedia search results: {}", err);
+                return;
+            }
+        }
+        .pages;
 
-        Ok(json
+        pages
             .iter()
             .filter_map(|arr| {
                 let title = arr.title.clone();
-                let url: Option<Url> = format!("https://en.wikipedia.org/wiki/{}", &arr.key)
+                let url: Option<Uri> = format!("https://en.wikipedia.org/wiki/{}", &arr.key)
                     .parse()
                     .ok();
                 let excerpt = Some(arr.excerpt.clone());
@@ -171,6 +159,9 @@ impl Search for WikipediaSearch {
                     }),
                 }
             })
-            .collect())
+            .for_each(|result| {
+                let sender = sender.clone();
+                tokio::spawn(async move { sender.send(result).await });
+            })
     }
 }

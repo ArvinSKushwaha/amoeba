@@ -8,9 +8,13 @@ authors = ["Arvin Kushwaha <arvin.singh.kushwaha@gmail.com>"]
 
 [dependencies]
 regex = "1.5.6"
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1.8"
+async-stream = "0.3.3"
+hyper-tls = "0.5.0"
+http = "0.2.7"
 lazy_static = "1.4.0"
-futures = "0.3.21"
 urlencoding = "2.1.0"
 serde = { version = "1.0.137", features = ["derive"] }
 serde_json = "1.0.81"
@@ -20,3 +24,6 @@ simplelog = "0.12.0"
 egui = "0.18.1"
 eframe = "0.18.0"
 async-trait = "0.1.53"
+futures-timer = "3.0.2"
+tokio-serde-json = "0.3.0"
+futures = "0.3.21"

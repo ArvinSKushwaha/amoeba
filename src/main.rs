@@ -10,16 +10,23 @@ use std::process::ExitCode;
 
 use crate::{
     gui::Amoeba,
-    searcher::{QueryEngine, WikipediaSearch},
+    query::QueryEngine,
+    searcher::{TestSearch, WikipediaSearch},
 };
 
 const CONNECT_ATTEMPTS_MAX: usize = 3;
+const QUERY_DELAY_MS: u64 = 1000;
+const QUERY_TIMEOUT_MS: u64 = 2000;
 
 fn main() -> ExitCode {
     init_logger();
 
     let query_engine = {
-        let qe = QueryEngine::new().register("wiki", WikipediaSearch);
+        let qe = QueryEngine::builder()
+            .register("test", TestSearch)
+            .register("wiki", WikipediaSearch)
+            .build();
+
         match qe {
             Ok(qe) => qe,
             Err(e) => {
@@ -45,7 +52,7 @@ fn main() -> ExitCode {
 
 fn init_logger() {
     simplelog::TermLogger::init(
-        log::LevelFilter::Info,
+        log::LevelFilter::Trace,
         simplelog::Config::default(),
         simplelog::TerminalMode::Mixed,
         simplelog::ColorChoice::Always,

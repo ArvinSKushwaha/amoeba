@@ -1,5 +1,5 @@
 [package]
-name = "ameoba"
+name = "amoeba"
 version = "0.1.0"
 edition = "2021"
 authors = ["Arvin Kushwaha <arvin.singh.kushwaha@gmail.com>"]
